@@ -1,0 +1,31 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Heating Scheduler",
+        "description": "Set up the Heating Scheduler integration. Schedules themselves are created and managed afterwards from the Heating Scheduler dashboard card."
+      }
+    },
+    "abort": {
+      "already_configured": "Heating Scheduler is already configured."
+    }
+  },
+  "entity": {
+    "select": {
+      "no_schedule_action": {
+        "name": "Without an active schedule",
+        "state": {
+          "off": "Turn off",
+          "nothing": "Do nothing"
+        }
+      },
+      "enforcement": {
+        "name": "Schedule enforcement",
+        "state": {
+          "force": "Force schedule",
+          "respect_manual": "Respect manual changes"
+        }
+      }
+    }
+  }
+}

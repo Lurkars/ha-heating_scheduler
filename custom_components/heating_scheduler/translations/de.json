@@ -1,0 +1,31 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Heizungsplaner",
+        "description": "Richte die Heizungsplaner-Integration ein. Die Zeitpläne selbst legst du danach über die Heizungsplaner-Dashboard-Karte an."
+      }
+    },
+    "abort": {
+      "already_configured": "Heizungsplaner ist bereits eingerichtet."
+    }
+  },
+  "entity": {
+    "select": {
+      "no_schedule_action": {
+        "name": "Ohne aktiven Plan",
+        "state": {
+          "off": "Aus schalten",
+          "nothing": "Nichts tun"
+        }
+      },
+      "enforcement": {
+        "name": "Plandurchsetzung",
+        "state": {
+          "force": "Plan erzwingen",
+          "respect_manual": "Manuelle Änderung respektieren"
+        }
+      }
+    }
+  }
+}
