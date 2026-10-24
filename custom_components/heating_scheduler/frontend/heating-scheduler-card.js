@@ -250,13 +250,13 @@ class HeatingSchedulerCard extends HTMLElement {
   }
 
   /**
-   * Derive a schedule's live state from the backend status. Three
-   * independent visual axes in the list:
-   * - running (tinted icon bubble): it is currently applied to >= 1 thermostat
-   * - outside (grey icon): weekday/time window doesn't match right now
-   * - blocked (struck-through icon): conditions not met
-   * plus an "overridden" badge when window and conditions match but a
-   * schedule further down the list wins for some/all of its thermostats.
+   * Derive a schedule's live state from the backend status, shown in the list
+   * as:
+   * - inactive (grey icon): weekday/time window or conditions don't match
+   * - blocked (struck-through icon + grey name): conditions not met; takes
+   *   precedence, so "outside the window" needs no extra marker on top
+   * - overridden (small badge): window and conditions match, but a schedule
+   *   further down the list wins for some/all of its thermostats
    */
   _scheduleState(schedule) {
     const status = this._status[schedule.id];
@@ -287,8 +287,7 @@ class HeatingSchedulerCard extends HTMLElement {
     if (!status.conditions_met) titles.push(t.conditionNotMet);
 
     return {
-      running: active.length > 0,
-      outside: !status.in_window,
+      inactive: !eligible,
       blocked: !status.conditions_met,
       overridden: overriddenEntities.length > 0,
       title: titles.join(" · "),
@@ -548,12 +547,12 @@ class HeatingSchedulerCard extends HTMLElement {
 
     const state = this._scheduleState(schedule);
     const stateClasses = state
-      ? ["running", "outside", "blocked", "overridden"].filter((key) => state[key]).join(" ")
+      ? ["inactive", "blocked", "overridden"].filter((key) => state[key]).join(" ")
       : "";
     const avgTemp = this._averageCurrentTemperature(schedule);
 
     return `
-      <div class="schedule-item ${schedule.enabled ? "" : "disabled-row"}" data-action="edit" data-id="${schedule.id}">
+      <div class="schedule-item ${schedule.enabled ? "" : "disabled-row"} ${state && state.blocked ? "condition-blocked" : ""}" data-action="edit" data-id="${schedule.id}">
         <div class="mode-icon-wrap mode-${schedule.mode} ${stateClasses}" ${state ? `title="${state.title}"` : ""}>
           <ha-icon class="mode-icon" icon="${MODE_ICONS[schedule.mode] || "mdi:thermostat"}"></ha-icon>
           ${state && state.overridden ? `<ha-icon class="state-badge" icon="mdi:layers"></ha-icon>` : ""}
@@ -885,19 +884,14 @@ class HeatingSchedulerCard extends HTMLElement {
       .mode-icon-wrap {
         --mode-color: var(--secondary-text-color);
         position: relative; flex: none;
-        width: 36px; height: 36px; border-radius: 50%;
+        width: 28px; height: 28px;
         display: flex; align-items: center; justify-content: center;
-        transition: background-color 0.2s;
       }
       .mode-icon-wrap.mode-heat { --mode-color: var(--state-active-color, #ff8100); }
       .mode-icon-wrap.mode-auto { --mode-color: var(--primary-color); }
       .mode-icon-wrap.mode-off { --mode-color: var(--primary-text-color); }
-      .mode-icon-wrap.outside { --mode-color: var(--disabled-text-color, #bdbdbd); }
-      .mode-icon { color: var(--mode-color); --mdc-icon-size: 22px; }
-      /* Currently applied: tinted bubble, like HA's own tile card icons. */
-      .mode-icon-wrap.running {
-        background: color-mix(in srgb, var(--mode-color) 20%, transparent);
-      }
+      .mode-icon-wrap.inactive { --mode-color: var(--disabled-text-color, #bdbdbd); }
+      .mode-icon { color: var(--mode-color); }
       /* Conditions not met: strike through the icon, mimicking mdi's "-off"
          icons (the ring in the background colour cuts a gap into the icon). */
       .mode-icon-wrap.blocked::after {
@@ -925,6 +919,7 @@ class HeatingSchedulerCard extends HTMLElement {
         font-weight: 500; color: var(--primary-text-color);
         overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
       }
+      .schedule-item.condition-blocked .schedule-name { color: var(--secondary-text-color); }
       .schedule-meta {
         font-size: 0.85em; color: var(--secondary-text-color);
         overflow: hidden; text-overflow: ellipsis; white-space: nowrap;

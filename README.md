@@ -52,11 +52,10 @@ The mode icon in the list shows each schedule's live state (hover it for details
 
 | Icon | Meaning |
 | --- | --- |
-| coloured, with tinted circle | active - currently applied to at least one thermostat |
-| coloured, no circle | weekday/time matches, but it isn't applied (see below) |
+| coloured | weekday/time window and conditions match |
 | grey | outside of its weekday/time window |
-| struck through | conditions not met (combines with coloured/grey) |
-| small layers badge | overridden by a schedule further down the list, for some or all of its thermostats |
+| grey, struck through, greyed-out name | conditions not met (regardless of the time window) |
+| small layers badge | matches, but overridden by a schedule further down the list, for some or all of its thermostats |
 
 Use **Duplicate** in a schedule's menu (⋮) to open a pre-filled copy in the editor; it's only created once you save it (and is appended at the end of the list, i.e. with the highest priority).
 
