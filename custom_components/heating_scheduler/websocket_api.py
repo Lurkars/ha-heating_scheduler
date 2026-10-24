@@ -19,6 +19,7 @@ SCHEDULE_SCHEMA = vol.Schema(
         vol.Required("mode"): vol.In(MODES),
         vol.Optional("temperature", default=None): vol.Any(None, vol.Coerce(float)),
         vol.Optional("conditions", default=[]): [str],
+        vol.Optional("disable_conditions", default=[]): [str],
     },
     extra=vol.REMOVE_EXTRA,
 )

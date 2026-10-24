@@ -10,7 +10,8 @@ Custom Home Assistant integration + dashboard card for managing heating schedule
 - From/to time, including overnight spans (e.g. 22:00-06:00)
 - Mode per schedule: **Auto**, **Heat** (with target temperature), or **Off** (no temperature needed)
 - Any number of condition entities (`input_boolean`, `binary_sensor`, `switch`) per schedule, **all** of which must be "on" for the schedule to apply
-- Clear management GUI as a dashboard card: create, edit, delete, enable/disable, reorder via arrows
+- Any number of disable condition entities per schedule: if **any** of them is "on", the schedule is ignored
+- Clear management GUI as a dashboard card: create, edit, duplicate (as a template), delete, enable/disable, reorder via arrows
 - Schedule order = priority: if two active schedules overlap for the same thermostat, the one **lower in the list** automatically wins ("gets overwritten")
 - Two behaviour switches as dedicated `select` entities (see below), changeable live at any time
 - Fully localized UI: English and German, following Home Assistant's own language setting
@@ -47,12 +48,15 @@ Create a schedule in the card via "+ New schedule":
 - **Mode** - Auto / Heat / Off; no temperature is set when "Off"
 - **Target temperature** - only relevant for Heat/Auto mode
 - **Conditions** - e.g. `input_boolean.heating_enabled`, `input_boolean.kids_home`, `input_boolean.holidays`; the schedule is only applied when **all** selected conditions are "on"
+- **Disable conditions** - the inverse of conditions, e.g. `input_boolean.holidays`, `binary_sensor.window_open`; the schedule is ignored as soon as **any** of them is "on"
+
+Use **Duplicate** in a schedule's menu (⋮) to open a pre-filled copy in the editor; it's only created once you save it (and is appended at the end of the list, i.e. with the highest priority).
 
 ## How evaluation works
 
 - Re-evaluated every minute, and immediately whenever a condition entity or one of the two behaviour switches changes.
-- For each thermostat, the list of schedules is walked from bottom to top; the **first** schedule found that way (i.e. the one lowest in the list) that currently matches time/weekday, is enabled, and has its conditions met, wins and gets applied.
-- If **no** schedule currently matches (e.g. a gap between two schedules, or unmet conditions), `select.heating_scheduler_no_schedule_action` ("Heating Scheduler: Without an active schedule") takes over:
+- For each thermostat, the list of schedules is walked from bottom to top; the **first** schedule found that way (i.e. the one lowest in the list) that currently matches time/weekday, is enabled, has its conditions met and none of its disable conditions on, wins and gets applied.
+- If **no** schedule currently matches (e.g. a gap between two schedules, unmet conditions, or an active disable condition), `select.heating_scheduler_no_schedule_action` ("Heating Scheduler: Without an active schedule") takes over:
   - **Turn off** (default) - the thermostat is set to `off`.
   - **Do nothing** - the thermostat is left untouched; manual control is fully respected.
 - Whenever a target is active (a schedule or the off-fallback), `select.heating_scheduler_enforcement` ("Heating Scheduler: Schedule enforcement") decides how it's handled:

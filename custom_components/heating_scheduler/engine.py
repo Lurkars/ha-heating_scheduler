@@ -2,7 +2,7 @@
 
 Priority model: schedules are evaluated in list order, and the *last* schedule
 in the list that currently matches (weekday, time window, all conditions true,
-enabled) wins for a given climate entity. This gives a simple "last one
+no disable condition true, enabled) wins for a given climate entity. This gives a simple "last one
 overwrites" behaviour without needing an explicit priority field - reordering
 schedules in the UI is how you change precedence.
 
@@ -17,8 +17,8 @@ they can be changed live from any dashboard:
   changes (a different schedule/fallback takes over), so a manual change made
   while a schedule is active is left alone until the next transition.
 
-Re-evaluation happens every minute and whenever any condition entity used by a
-schedule - or either behaviour select - changes state, so a boolean flipping
+Re-evaluation happens every minute and whenever any condition or disable
+condition entity used by a schedule - or either behaviour select - changes state, so a boolean flipping
 mid-window (e.g. "Kinder zuhause" turning off) takes effect immediately
 instead of waiting for the next scheduled boundary.
 """
@@ -116,7 +116,8 @@ class SchedulerEngine:
             {
                 entity_id
                 for schedule in self.store.schedules
-                for entity_id in schedule.get("conditions", [])
+                for key in ("conditions", "disable_conditions")
+                for entity_id in schedule.get(key, [])
             }
             | {NO_SCHEDULE_ACTION_ENTITY_ID, ENFORCEMENT_ENTITY_ID}
         )
@@ -172,6 +173,9 @@ class SchedulerEngine:
             if not self._conditions_met(schedule.get("conditions", [])):
                 continue
 
+            if self._any_condition_on(schedule.get("disable_conditions", [])):
+                continue
+
             return schedule
         return None
 
@@ -181,6 +185,14 @@ class SchedulerEngine:
             if state is None or state.state not in _CONDITION_TRUE_STATES:
                 return False
         return True
+
+    def _any_condition_on(self, condition_entities: list[str]) -> bool:
+        """Return whether any of the given (disable) condition entities is on."""
+        for entity_id in condition_entities:
+            state = self.hass.states.get(entity_id)
+            if state is not None and state.state in _CONDITION_TRUE_STATES:
+                return True
+        return False
 
     def _resolve_target(
         self, winner: dict[str, Any] | None

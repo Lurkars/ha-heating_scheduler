@@ -24,10 +24,13 @@ const STRINGS = {
     moveUp: "Nach oben",
     moveDown: "Nach unten",
     edit: "Bearbeiten",
+    duplicate: "Duplizieren",
+    copySuffix: "(Kopie)",
     delete: "Löschen",
     enable: "Aktivieren",
     disable: "Deaktivieren",
     conditionNotMet: "Bedingung nicht erfüllt",
+    disabledBy: "Deaktiviert durch",
     confirmDelete: (name) => `Zeitplan "${name}" wirklich löschen?`,
     editTitle: "Zeitplan bearbeiten",
     newTitle: "Neuer Zeitplan",
@@ -40,6 +43,7 @@ const STRINGS = {
     mode: "Modus",
     targetTemp: "Zieltemperatur (°C)",
     conditions: "Bedingungen (müssen alle erfüllt sein, sonst wird der Plan ignoriert)",
+    disableConditions: "Ausschlussbedingungen (ist eine davon aktiv, wird der Plan ignoriert)",
     cancel: "Abbrechen",
     save: "Speichern",
     modeLabels: { auto: "Automatik", heat: "Heizen", off: "Aus" },
@@ -59,10 +63,13 @@ const STRINGS = {
     moveUp: "Move up",
     moveDown: "Move down",
     edit: "Edit",
+    duplicate: "Duplicate",
+    copySuffix: "(copy)",
     delete: "Delete",
     enable: "Enable",
     disable: "Disable",
     conditionNotMet: "Condition not met",
+    disabledBy: "Disabled by",
     confirmDelete: (name) => `Really delete schedule "${name}"?`,
     editTitle: "Edit schedule",
     newTitle: "New schedule",
@@ -75,6 +82,7 @@ const STRINGS = {
     mode: "Mode",
     targetTemp: "Target temperature (°C)",
     conditions: "Conditions (all must be met, otherwise the schedule is ignored)",
+    disableConditions: "Disable conditions (if any of them is on, the schedule is ignored)",
     cancel: "Cancel",
     save: "Save",
     modeLabels: { auto: "Auto", heat: "Heat", off: "Off" },
@@ -113,6 +121,7 @@ function emptySchedule() {
     mode: "heat",
     temperature: 21,
     conditions: [],
+    disable_conditions: [],
   };
 }
 
@@ -173,6 +182,7 @@ class HeatingSchedulerCard extends HTMLElement {
     const climateEntities = new Set();
     for (const schedule of this._schedules) {
       for (const id of schedule.conditions || []) conditionEntities.add(id);
+      for (const id of schedule.disable_conditions || []) conditionEntities.add(id);
       for (const id of schedule.entities || []) climateEntities.add(id);
     }
     for (const id of conditionEntities) {
@@ -197,18 +207,20 @@ class HeatingSchedulerCard extends HTMLElement {
     return Math.round(avg * 10) / 10;
   }
 
-  _conditionsMet(schedule) {
-    return (schedule.conditions || []).every((id) => {
-      const state = this._hass.states[id];
-      return !!state && state.state === "on";
-    });
-  }
-
   _blockingConditionNames(schedule) {
     return (schedule.conditions || [])
       .filter((id) => {
         const state = this._hass.states[id];
         return !(state && state.state === "on");
+      })
+      .map((id) => friendlyName(this._hass, id));
+  }
+
+  _activeDisableConditionNames(schedule) {
+    return (schedule.disable_conditions || [])
+      .filter((id) => {
+        const state = this._hass.states[id];
+        return !!state && state.state === "on";
       })
       .map((id) => friendlyName(this._hass, id));
   }
@@ -254,9 +266,23 @@ class HeatingSchedulerCard extends HTMLElement {
     this._reorder(order);
   }
 
-  _openEditor(schedule) {
-    this._editing = schedule ? { ...schedule, entities: [...schedule.entities], weekdays: [...schedule.weekdays], conditions: [...schedule.conditions] } : emptySchedule();
-    this._editingSnapshot = JSON.stringify(this._editing);
+  _openEditor(schedule, { duplicate = false } = {}) {
+    this._editing = schedule
+      ? {
+          ...schedule,
+          entities: [...schedule.entities],
+          weekdays: [...schedule.weekdays],
+          conditions: [...(schedule.conditions || [])],
+          disable_conditions: [...(schedule.disable_conditions || [])],
+        }
+      : emptySchedule();
+    if (duplicate) {
+      this._editing.id = null;
+      this._editing.name = `${schedule.name} ${this._t.copySuffix}`;
+    }
+    // A duplicate is a new, unsaved schedule, so it must be saveable right
+    // away even without further changes.
+    this._editingSnapshot = duplicate ? null : JSON.stringify(this._editing);
     this._error = null;
     this._render();
   }
@@ -307,6 +333,9 @@ class HeatingSchedulerCard extends HTMLElement {
       this._openEditor(null);
     } else if (action === "edit") {
       this._openEditor(this._schedules.find((s) => s.id === id));
+    } else if (action === "duplicate") {
+      const schedule = this._schedules.find((s) => s.id === id);
+      if (schedule) this._openEditor(schedule, { duplicate: true });
     } else if (action === "delete") {
       const schedule = this._schedules.find((s) => s.id === id);
       if (schedule && confirm(t.confirmDelete(schedule.name))) {
@@ -393,6 +422,7 @@ class HeatingSchedulerCard extends HTMLElement {
       mode,
       temperature,
       conditions: this._editing.conditions,
+      disable_conditions: this._editing.disable_conditions,
     };
 
     this._saveSchedule(schedule);
@@ -446,11 +476,13 @@ class HeatingSchedulerCard extends HTMLElement {
       ? `${days} · ${schedule.time_from}–${schedule.time_to}`
       : `${days} · ${schedule.time_from}–${schedule.time_to} · ${schedule.temperature} °C`;
 
-    const conditionsMet = this._conditionsMet(schedule);
-    const showBlocked = schedule.enabled && schedule.conditions.length > 0 && !conditionsMet;
-    const blockedTitle = showBlocked
-      ? `${t.conditionNotMet}: ${this._blockingConditionNames(schedule).join(", ")}`
-      : "";
+    const unmetConditions = this._blockingConditionNames(schedule);
+    const activeDisableConditions = this._activeDisableConditionNames(schedule);
+    const showBlocked = schedule.enabled && (unmetConditions.length > 0 || activeDisableConditions.length > 0);
+    const blockedTitle = [
+      unmetConditions.length > 0 ? `${t.conditionNotMet}: ${unmetConditions.join(", ")}` : "",
+      activeDisableConditions.length > 0 ? `${t.disabledBy}: ${activeDisableConditions.join(", ")}` : "",
+    ].filter(Boolean).join(" · ");
     const avgTemp = this._averageCurrentTemperature(schedule);
 
     return `
@@ -478,6 +510,9 @@ class HeatingSchedulerCard extends HTMLElement {
             </button>
             <button data-action="move-down" data-id="${schedule.id}" ${index === this._schedules.length - 1 ? "disabled" : ""}>
               <ha-icon icon="mdi:arrow-down"></ha-icon>${t.moveDown}
+            </button>
+            <button data-action="duplicate" data-id="${schedule.id}">
+              <ha-icon icon="mdi:content-copy"></ha-icon>${t.duplicate}
             </button>
             <button data-action="delete" data-id="${schedule.id}" class="danger">
               <ha-icon icon="mdi:delete"></ha-icon>${t.delete}
@@ -563,6 +598,11 @@ class HeatingSchedulerCard extends HTMLElement {
               <span>${t.conditions}</span>
               <div id="conditions-picker"></div>
             </div>
+
+            <div class="field">
+              <span>${t.disableConditions}</span>
+              <div id="disable-conditions-picker"></div>
+            </div>
           </div>
           <div class="modal-footer">
             <button class="btn btn-text" data-action="close-modal">${t.cancel}</button>
@@ -575,7 +615,7 @@ class HeatingSchedulerCard extends HTMLElement {
 
   /**
    * Mount Home Assistant's own <ha-selector> entity pickers into the modal
-   * for the thermostate/condition fields, instead of a bespoke checkbox
+   * for the thermostate/condition/disable-condition fields, instead of a bespoke checkbox
    * list, so the UX matches the rest of Home Assistant (e.g. the
    * automation/blueprint editor). ha-selector is part of a lazily loaded
    * frontend chunk, so wait for it to be defined if it isn't yet (it almost
@@ -652,6 +692,19 @@ class HeatingSchedulerCard extends HTMLElement {
           domains: CONDITION_DOMAINS,
           onChange: (value) => {
             this._editing.conditions = value;
+          },
+        })
+      );
+    }
+
+    const disableConditionsContainer = root.getElementById("disable-conditions-picker");
+    if (disableConditionsContainer && !disableConditionsContainer.firstChild) {
+      disableConditionsContainer.appendChild(
+        this._createEntitySelector({
+          value: this._editing.disable_conditions,
+          domains: CONDITION_DOMAINS,
+          onChange: (value) => {
+            this._editing.disable_conditions = value;
           },
         })
       );

@@ -17,7 +17,7 @@ CONDITION_DOMAINS = ["input_boolean", "binary_sensor", "switch"]
 # changes so a hard browser refresh reliably picks up the new file during
 # development, rather than an old cached copy.
 CARD_PATH = "/heating_scheduler_files/heating-scheduler-card.js"
-CARD_VERSION = "9"
+CARD_VERSION = "10"
 CARD_URL = f"{CARD_PATH}?v={CARD_VERSION}"
 
 # Options for the "no schedule active" behaviour select entity. These are
