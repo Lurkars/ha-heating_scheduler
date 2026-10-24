@@ -146,6 +146,21 @@ class HeatingSchedulerCard extends HTMLElement {
     this._unsubscribeStatus();
   }
 
+  /**
+   * The condition editor's own labels (condition types, and/or/not, the tabs
+   * and groups of the "add condition" dialog) live in Home Assistant's
+   * "config" translation fragment. That is normally only loaded in the
+   * settings panel, not on dashboards, so load it here explicitly. Loading it
+   * produces a new hass object whose localize knows the new strings.
+   */
+  _loadEditorTranslations() {
+    if (this._editorTranslationsLoaded || typeof this._hass.loadFragmentTranslation !== "function") return;
+    this._editorTranslationsLoaded = true;
+    this._hass.loadFragmentTranslation("config").catch(() => {
+      this._editorTranslationsLoaded = false;
+    });
+  }
+
   _subscribeStatus() {
     if (!this._hass || !this.isConnected || this._statusSubscription) return;
     this._statusSubscription = this._hass.connection.subscribeMessage(
@@ -181,9 +196,17 @@ class HeatingSchedulerCard extends HTMLElement {
     this._t = getStrings(hass);
     if (!this._initialized) {
       this._initialized = true;
+      this._loadEditorTranslations();
       this._subscribeStatus();
       this._fetchSchedules();
       return;
+    }
+    // Open selectors need the current hass, both for live states and for
+    // translations loaded after they were mounted.
+    if (this._editing) {
+      this.shadowRoot.querySelectorAll(".modal ha-selector").forEach((el) => {
+        el.hass = hass;
+      });
     }
     // Re-render the list live when a scheduled thermostat's current
     // temperature changes (condition status arrives via its own
