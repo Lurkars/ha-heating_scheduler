@@ -44,6 +44,7 @@ from homeassistant.helpers.event import (
     async_track_state_change_event,
     async_track_time_change,
 )
+from homeassistant.util import dt as dt_util
 
 from .const import (
     ENFORCEMENT_ENTITY_ID,
@@ -112,8 +113,9 @@ class SchedulerEngine:
         self._last_commanded: dict[str, tuple[str, str, float | None]] = {}
         self._checkers: dict[str, Callable[..., bool]] = {}
         self._condition_entities: set[str] = set()
-        # Schedule id -> whether its conditions are currently met.
-        self.conditions_status: dict[str, bool] = {}
+        # Schedule id -> {"in_window", "conditions_met", "active_entities"},
+        # pushed to the card so it can show each schedule's live state.
+        self.status: dict[str, dict[str, Any]] = {}
 
     async def async_start(self) -> None:
         """Start periodic evaluation and condition-entity tracking."""
@@ -203,17 +205,18 @@ class SchedulerEngine:
 
     async def async_evaluate(self, now: datetime | None = None) -> None:
         """Re-evaluate every scheduled climate entity and apply the winner."""
-        now = now or datetime.now()
-        current_time = now.time()
+        now = now or dt_util.now()
 
-        # Evaluate each schedule's conditions once per run, not per entity.
+        # Evaluate each schedule's time window and conditions once per run,
+        # not per entity.
         status = {
-            schedule["id"]: self._check_conditions(schedule)
+            schedule["id"]: {
+                "in_window": self._in_schedule_window(schedule, now),
+                "conditions_met": self._check_conditions(schedule),
+                "active_entities": [],
+            }
             for schedule in self.store.schedules
         }
-        if status != self.conditions_status:
-            self.conditions_status = status
-            async_dispatcher_send(self.hass, SIGNAL_STATUS_UPDATED, status)
 
         entities = sorted(
             {
@@ -223,18 +226,32 @@ class SchedulerEngine:
             }
         )
 
+        targets = []
         for entity_id in entities:
-            winner = self._find_winner(entity_id, now, current_time, status)
-            target = self._resolve_target(winner)
+            winner = self._find_winner(entity_id, status)
+            if winner is not None:
+                status[winner["id"]]["active_entities"].append(entity_id)
+            targets.append((entity_id, self._resolve_target(winner)))
+
+        if status != self.status:
+            self.status = status
+            async_dispatcher_send(self.hass, SIGNAL_STATUS_UPDATED, status)
+
+        for entity_id, target in targets:
             if target is not None:
                 await self._maybe_apply(entity_id, target)
 
+    @staticmethod
+    def _in_schedule_window(schedule: dict[str, Any], now: datetime) -> bool:
+        """Return whether weekday and time window of a schedule match now."""
+        start = _parse_time(schedule["time_from"])
+        end = _parse_time(schedule["time_to"])
+        if not _in_window(now.time(), start, end):
+            return False
+        return _matching_weekday(now, start, end) in schedule.get("weekdays", [])
+
     def _find_winner(
-        self,
-        entity_id: str,
-        now: datetime,
-        current_time: dt_time,
-        status: dict[str, bool],
+        self, entity_id: str, status: dict[str, dict[str, Any]]
     ) -> dict[str, Any] | None:
         for schedule in reversed(self.store.schedules):
             if not schedule.get("enabled", True):
@@ -242,19 +259,9 @@ class SchedulerEngine:
             if entity_id not in schedule.get("entities", []):
                 continue
 
-            start = _parse_time(schedule["time_from"])
-            end = _parse_time(schedule["time_to"])
-            if not _in_window(current_time, start, end):
-                continue
-
-            weekday = _matching_weekday(now, start, end)
-            if weekday not in schedule.get("weekdays", []):
-                continue
-
-            if not status.get(schedule["id"], False):
-                continue
-
-            return schedule
+            schedule_status = status[schedule["id"]]
+            if schedule_status["in_window"] and schedule_status["conditions_met"]:
+                return schedule
         return None
 
     def _resolve_target(

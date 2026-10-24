@@ -48,6 +48,16 @@ Create a schedule in the card via "+ New schedule":
 - **Target temperature** - only relevant for Heat/Auto mode
 - **Conditions** - exactly the same conditions (and editor) as in automations, e.g. `input_boolean.kids_home` is on, outdoor temperature below 15 °C, someone is home, or any template; the schedule is only applied when **all** top-level conditions are met. To *exclude* a schedule (e.g. during holidays or with a window open), wrap the conditions in a **Not** condition. Weekdays and the time window stay separate fields on purpose.
 
+The mode icon in the list shows each schedule's live state (hover it for details):
+
+| Icon | Meaning |
+| --- | --- |
+| coloured, with tinted circle | active - currently applied to at least one thermostat |
+| coloured, no circle | weekday/time matches, but it isn't applied (see below) |
+| grey | outside of its weekday/time window |
+| struck through | conditions not met (combines with coloured/grey) |
+| small layers badge | overridden by a schedule further down the list, for some or all of its thermostats |
+
 Use **Duplicate** in a schedule's menu (⋮) to open a pre-filled copy in the editor; it's only created once you save it (and is appended at the end of the list, i.e. with the highest priority).
 
 ## How evaluation works

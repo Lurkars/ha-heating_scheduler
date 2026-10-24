@@ -28,6 +28,10 @@ const STRINGS = {
     enable: "Aktivieren",
     disable: "Deaktivieren",
     conditionNotMet: "Bedingungen nicht erfüllt",
+    stateActive: "Aktiv",
+    statePartial: (active, total, names) => `Aktiv für ${active} von ${total} Thermostaten, Rest überschrieben durch: ${names}`,
+    stateOverridden: (names) => `Überschrieben durch: ${names}`,
+    stateOutside: "Außerhalb von Wochentag/Zeitfenster",
     confirmDelete: (name) => `Zeitplan "${name}" wirklich löschen?`,
     editTitle: "Zeitplan bearbeiten",
     newTitle: "Neuer Zeitplan",
@@ -65,6 +69,10 @@ const STRINGS = {
     enable: "Enable",
     disable: "Disable",
     conditionNotMet: "Conditions not met",
+    stateActive: "Active",
+    statePartial: (active, total, names) => `Active for ${active} of ${total} thermostats, rest overridden by: ${names}`,
+    stateOverridden: (names) => `Overridden by: ${names}`,
+    stateOutside: "Outside of weekday/time window",
     confirmDelete: (name) => `Really delete schedule "${name}"?`,
     editTitle: "Edit schedule",
     newTitle: "New schedule",
@@ -127,9 +135,10 @@ class HeatingSchedulerCard extends HTMLElement {
     this._error = null;
     this._initialized = false;
     this._t = STRINGS.en;
-    // Schedule id -> conditions met, pushed by the backend (the card can't
-    // evaluate arbitrary automation conditions like templates itself).
-    this._conditionStatus = {};
+    // Schedule id -> {in_window, conditions_met, active_entities}, pushed by
+    // the backend (the card can't evaluate arbitrary automation conditions
+    // like templates itself, and HA's time zone may differ from the browser's).
+    this._status = {};
     this._statusSubscription = null;
     this._outsideClickHandler = (ev) => {
       if (!ev.composedPath().includes(this)) this._closeAllMenus();
@@ -165,7 +174,7 @@ class HeatingSchedulerCard extends HTMLElement {
     if (!this._hass || !this.isConnected || this._statusSubscription) return;
     this._statusSubscription = this._hass.connection.subscribeMessage(
       (msg) => {
-        this._conditionStatus = msg.conditions_met || {};
+        this._status = msg.status || {};
         if (!this._editing) this._render();
       },
       { type: "heating_scheduler/subscribe_status" }
@@ -238,6 +247,52 @@ class HeatingSchedulerCard extends HTMLElement {
     if (temps.length === 0) return null;
     const avg = temps.reduce((sum, t) => sum + t, 0) / temps.length;
     return Math.round(avg * 10) / 10;
+  }
+
+  /**
+   * Derive a schedule's live state from the backend status. Three
+   * independent visual axes in the list:
+   * - running (tinted icon bubble): it is currently applied to >= 1 thermostat
+   * - outside (grey icon): weekday/time window doesn't match right now
+   * - blocked (struck-through icon): conditions not met
+   * plus an "overridden" badge when window and conditions match but a
+   * schedule further down the list wins for some/all of its thermostats.
+   */
+  _scheduleState(schedule) {
+    const status = this._status[schedule.id];
+    if (!status || !schedule.enabled) return null;
+
+    const t = this._t;
+    const active = status.active_entities || [];
+    const eligible = status.in_window && status.conditions_met;
+    const overriddenEntities = eligible ? schedule.entities.filter((id) => !active.includes(id)) : [];
+    const overriddenBy = this._schedules
+      .filter((other) => other.id !== schedule.id)
+      .filter((other) => {
+        const otherActive = (this._status[other.id] || {}).active_entities || [];
+        return overriddenEntities.some((id) => otherActive.includes(id));
+      })
+      .map((other) => other.name)
+      .join(", ");
+
+    const titles = [];
+    if (active.length > 0) {
+      titles.push(overriddenEntities.length > 0
+        ? t.statePartial(active.length, schedule.entities.length, overriddenBy)
+        : t.stateActive);
+    } else if (overriddenEntities.length > 0) {
+      titles.push(t.stateOverridden(overriddenBy));
+    }
+    if (!status.in_window) titles.push(t.stateOutside);
+    if (!status.conditions_met) titles.push(t.conditionNotMet);
+
+    return {
+      running: active.length > 0,
+      outside: !status.in_window,
+      blocked: !status.conditions_met,
+      overridden: overriddenEntities.length > 0,
+      title: titles.join(" · "),
+    };
   }
 
   getCardSize() {
@@ -491,14 +546,20 @@ class HeatingSchedulerCard extends HTMLElement {
       ? `${days} · ${schedule.time_from}–${schedule.time_to}`
       : `${days} · ${schedule.time_from}–${schedule.time_to} · ${schedule.temperature} °C`;
 
-    const showBlocked = schedule.enabled && this._conditionStatus[schedule.id] === false;
+    const state = this._scheduleState(schedule);
+    const stateClasses = state
+      ? ["running", "outside", "blocked", "overridden"].filter((key) => state[key]).join(" ")
+      : "";
     const avgTemp = this._averageCurrentTemperature(schedule);
 
     return `
-      <div class="schedule-item ${schedule.enabled ? "" : "disabled-row"} ${showBlocked ? "condition-blocked" : ""}" data-action="edit" data-id="${schedule.id}">
-        <ha-icon class="mode-icon mode-${schedule.mode}" icon="${MODE_ICONS[schedule.mode] || "mdi:thermostat"}"></ha-icon>
+      <div class="schedule-item ${schedule.enabled ? "" : "disabled-row"}" data-action="edit" data-id="${schedule.id}">
+        <div class="mode-icon-wrap mode-${schedule.mode} ${stateClasses}" ${state ? `title="${state.title}"` : ""}>
+          <ha-icon class="mode-icon" icon="${MODE_ICONS[schedule.mode] || "mdi:thermostat"}"></ha-icon>
+          ${state && state.overridden ? `<ha-icon class="state-badge" icon="mdi:layers"></ha-icon>` : ""}
+        </div>
         <div class="schedule-info">
-          <div class="schedule-name" ${showBlocked ? `title="${t.conditionNotMet}"` : ""}>${schedule.name}</div>
+          <div class="schedule-name">${schedule.name}</div>
           <div class="schedule-meta">${meta}</div>
         </div>
         <div class="thermostats" title="${entityNames}">
@@ -821,19 +882,48 @@ class HeatingSchedulerCard extends HTMLElement {
       .schedule-item:hover { background: var(--secondary-background-color, rgba(0,0,0,0.03)); }
       .schedule-item.disabled-row { opacity: 0.45; }
 
-      .mode-icon { flex: none; color: var(--secondary-text-color); }
-      .mode-icon.mode-heat { color: var(--state-active-color, #ff8100); }
-      .mode-icon.mode-auto { color: var(--primary-color); }
+      .mode-icon-wrap {
+        --mode-color: var(--secondary-text-color);
+        position: relative; flex: none;
+        width: 36px; height: 36px; border-radius: 50%;
+        display: flex; align-items: center; justify-content: center;
+        transition: background-color 0.2s;
+      }
+      .mode-icon-wrap.mode-heat { --mode-color: var(--state-active-color, #ff8100); }
+      .mode-icon-wrap.mode-auto { --mode-color: var(--primary-color); }
+      .mode-icon-wrap.mode-off { --mode-color: var(--primary-text-color); }
+      .mode-icon-wrap.outside { --mode-color: var(--disabled-text-color, #bdbdbd); }
+      .mode-icon { color: var(--mode-color); --mdc-icon-size: 22px; }
+      /* Currently applied: tinted bubble, like HA's own tile card icons. */
+      .mode-icon-wrap.running {
+        background: color-mix(in srgb, var(--mode-color) 20%, transparent);
+      }
+      /* Conditions not met: strike through the icon, mimicking mdi's "-off"
+         icons (the ring in the background colour cuts a gap into the icon). */
+      .mode-icon-wrap.blocked::after {
+        content: ""; position: absolute;
+        width: 2px; height: 28px; border-radius: 1px;
+        background: var(--mode-color);
+        transform: rotate(-45deg);
+        box-shadow: 0 0 0 2px var(--card-background-color, #fff);
+      }
+      .schedule-item:hover .mode-icon-wrap.blocked::after {
+        box-shadow: 0 0 0 2px var(--secondary-background-color, #f5f5f5);
+      }
+      /* Overridden by a schedule further down the list (for some/all thermostats). */
+      .state-badge {
+        position: absolute; right: -3px; bottom: -3px;
+        --mdc-icon-size: 14px;
+        padding: 1px; border-radius: 50%;
+        background: var(--card-background-color, #fff);
+        color: var(--secondary-text-color);
+      }
+      .schedule-item:hover .state-badge { background: var(--secondary-background-color, #f5f5f5); }
 
       .schedule-info { flex: 1; min-width: 0; }
       .schedule-name {
         font-weight: 500; color: var(--primary-text-color);
         overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-      }
-      .schedule-item.condition-blocked .schedule-name { color: var(--secondary-text-color); }
-      .schedule-item.condition-blocked .mode-icon.mode-heat,
-      .schedule-item.condition-blocked .mode-icon.mode-auto {
-        color: var(--disabled-text-color, #bdbdbd);
       }
       .schedule-meta {
         font-size: 0.85em; color: var(--secondary-text-color);

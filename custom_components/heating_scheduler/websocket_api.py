@@ -106,21 +106,22 @@ async def ws_reorder_schedules(hass, connection, msg):
 @websocket_api.websocket_command({vol.Required("type"): f"{DOMAIN}/subscribe_status"})
 @callback
 def ws_subscribe_status(hass, connection, msg):
-    """Push which schedules currently have their conditions met.
+    """Push each schedule's live state (time window, conditions, winners).
 
-    Conditions can be arbitrary (templates, sun, numeric_state, ...), so the
-    card can't evaluate them itself - the engine's result is pushed instead,
-    once right away and then whenever it changes.
+    Conditions can be arbitrary (templates, sun, numeric_state, ...) and the
+    time window depends on Home Assistant's time zone, so the card can't
+    evaluate them itself - the engine's result is pushed instead, once right
+    away and then whenever it changes.
     """
 
     @callback
     def forward(status):
         connection.send_message(
-            websocket_api.event_message(msg["id"], {"conditions_met": status})
+            websocket_api.event_message(msg["id"], {"status": status})
         )
 
     connection.subscriptions[msg["id"]] = async_dispatcher_connect(
         hass, SIGNAL_STATUS_UPDATED, forward
     )
     connection.send_result(msg["id"])
-    forward(hass.data[DOMAIN]["engine"].conditions_status)
+    forward(hass.data[DOMAIN]["engine"].status)
