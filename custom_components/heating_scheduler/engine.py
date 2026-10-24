@@ -1,8 +1,8 @@
 """Evaluate heating schedules and apply them to climate entities.
 
 Priority model: schedules are evaluated in list order, and the *last* schedule
-in the list that currently matches (weekday, time window, all conditions true,
-no disable condition true, enabled) wins for a given climate entity. This gives a simple "last one
+in the list that currently matches (weekday, time window, conditions met,
+enabled) wins for a given climate entity. This gives a simple "last one
 overwrites" behaviour without needing an explicit priority field - reordering
 schedules in the UI is how you change precedence.
 
@@ -17,18 +17,29 @@ they can be changed live from any dashboard:
   changes (a different schedule/fallback takes over), so a manual change made
   while a schedule is active is left alone until the next transition.
 
-Re-evaluation happens every minute and whenever any condition or disable
-condition entity used by a schedule - or either behaviour select - changes state, so a boolean flipping
-mid-window (e.g. "Kinder zuhause" turning off) takes effect immediately
-instead of waiting for the next scheduled boundary.
+Conditions use the exact same format and evaluation as automation conditions
+(state, numeric_state, template, time, sun, and/or/not, ...), via Home
+Assistant's own condition helpers.
+
+Re-evaluation happens every minute and whenever any entity referenced by a
+schedule's conditions - or either behaviour select - changes state, so e.g.
+"Kinder zuhause" turning off mid-window takes effect immediately instead of
+waiting for the next scheduled boundary. Template conditions don't expose
+their entities, so they are only picked up by the minute tick.
 """
 from __future__ import annotations
 
+import copy
 import logging
+from collections.abc import Callable
 from datetime import datetime, time as dt_time
 from typing import Any
 
+import voluptuous as vol
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import condition, config_validation as cv
+from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import (
     async_track_state_change_event,
     async_track_time_change,
@@ -40,13 +51,29 @@ from .const import (
     ENFORCEMENT_RESPECT_MANUAL,
     NO_SCHEDULE_ACTION_ENTITY_ID,
     NO_SCHEDULE_OFF,
+    SIGNAL_STATUS_UPDATED,
 )
 from .store import ScheduleStore
 
 _LOGGER = logging.getLogger(__name__)
 
-_CONDITION_TRUE_STATES = ("on",)
 _FALLBACK_OFF_SOURCE = "__fallback_off__"
+
+
+async def async_validate_conditions(
+    hass: HomeAssistant, raw_conditions: list[dict[str, Any]]
+) -> list[Any]:
+    """Validate automation-style conditions, the same way automations do.
+
+    Raises vol.Invalid or HomeAssistantError if a condition is invalid. The
+    raw input is left untouched, so it can be stored as entered.
+    """
+    conditions = cv.CONDITIONS_SCHEMA(copy.deepcopy(raw_conditions))
+    return await condition.async_validate_conditions_config(hass, conditions)
+
+
+def _never_met(variables: Any = None) -> bool:
+    return False
 
 
 def _parse_time(value: str) -> dt_time:
@@ -83,12 +110,17 @@ class SchedulerEngine:
         self._unsub_time = None
         self._unsub_state = None
         self._last_commanded: dict[str, tuple[str, str, float | None]] = {}
+        self._checkers: dict[str, Callable[..., bool]] = {}
+        self._condition_entities: set[str] = set()
+        # Schedule id -> whether its conditions are currently met.
+        self.conditions_status: dict[str, bool] = {}
 
     async def async_start(self) -> None:
         """Start periodic evaluation and condition-entity tracking."""
         self._unsub_time = async_track_time_change(
             self.hass, self._handle_time_tick, second=0
         )
+        await self._async_build_checkers()
         self._resubscribe_conditions()
         await self.async_evaluate()
 
@@ -104,8 +136,49 @@ class SchedulerEngine:
 
     async def async_reload(self) -> None:
         """Call after schedules were changed via the frontend."""
+        await self._async_build_checkers()
         self._resubscribe_conditions()
         await self.async_evaluate()
+
+    async def _async_build_checkers(self) -> None:
+        """Compile every schedule's conditions into a checker function."""
+        checkers: dict[str, Callable[..., bool]] = {}
+        entities: set[str] = set()
+
+        for schedule in self.store.schedules:
+            raw_conditions = schedule.get("conditions", [])
+            if not raw_conditions:
+                continue
+            name = f"Heating schedule '{schedule['name']}'"
+            try:
+                validated = await async_validate_conditions(self.hass, raw_conditions)
+                checker = await condition.async_conditions_from_config(
+                    self.hass, validated, _LOGGER, name
+                )
+            except (vol.Invalid, HomeAssistantError) as err:
+                # Never let a broken schedule apply - treat it as "not met".
+                _LOGGER.warning("Invalid conditions in %s: %s", name, err)
+                checker = _never_met
+            else:
+                for config in validated:
+                    entities |= condition.async_extract_entities(config)
+            checkers[schedule["id"]] = checker
+
+        self._checkers = checkers
+        self._condition_entities = entities
+
+    def _check_conditions(self, schedule: dict[str, Any]) -> bool:
+        checker = self._checkers.get(schedule["id"])
+        if checker is None:
+            # Not compiled (yet) - only safe to treat as met without conditions.
+            return not schedule.get("conditions")
+        try:
+            return checker(None)
+        except HomeAssistantError as err:
+            _LOGGER.warning(
+                "Error evaluating conditions of %s: %s", schedule["name"], err
+            )
+            return False
 
     def _resubscribe_conditions(self) -> None:
         if self._unsub_state:
@@ -113,12 +186,7 @@ class SchedulerEngine:
             self._unsub_state = None
 
         condition_entities = sorted(
-            {
-                entity_id
-                for schedule in self.store.schedules
-                for key in ("conditions", "disable_conditions")
-                for entity_id in schedule.get(key, [])
-            }
+            self._condition_entities
             | {NO_SCHEDULE_ACTION_ENTITY_ID, ENFORCEMENT_ENTITY_ID}
         )
         self._unsub_state = async_track_state_change_event(
@@ -138,6 +206,15 @@ class SchedulerEngine:
         now = now or datetime.now()
         current_time = now.time()
 
+        # Evaluate each schedule's conditions once per run, not per entity.
+        status = {
+            schedule["id"]: self._check_conditions(schedule)
+            for schedule in self.store.schedules
+        }
+        if status != self.conditions_status:
+            self.conditions_status = status
+            async_dispatcher_send(self.hass, SIGNAL_STATUS_UPDATED, status)
+
         entities = sorted(
             {
                 entity_id
@@ -147,13 +224,17 @@ class SchedulerEngine:
         )
 
         for entity_id in entities:
-            winner = self._find_winner(entity_id, now, current_time)
+            winner = self._find_winner(entity_id, now, current_time, status)
             target = self._resolve_target(winner)
             if target is not None:
                 await self._maybe_apply(entity_id, target)
 
     def _find_winner(
-        self, entity_id: str, now: datetime, current_time: dt_time
+        self,
+        entity_id: str,
+        now: datetime,
+        current_time: dt_time,
+        status: dict[str, bool],
     ) -> dict[str, Any] | None:
         for schedule in reversed(self.store.schedules):
             if not schedule.get("enabled", True):
@@ -170,29 +251,11 @@ class SchedulerEngine:
             if weekday not in schedule.get("weekdays", []):
                 continue
 
-            if not self._conditions_met(schedule.get("conditions", [])):
-                continue
-
-            if self._any_condition_on(schedule.get("disable_conditions", [])):
+            if not status.get(schedule["id"], False):
                 continue
 
             return schedule
         return None
-
-    def _conditions_met(self, condition_entities: list[str]) -> bool:
-        for entity_id in condition_entities:
-            state = self.hass.states.get(entity_id)
-            if state is None or state.state not in _CONDITION_TRUE_STATES:
-                return False
-        return True
-
-    def _any_condition_on(self, condition_entities: list[str]) -> bool:
-        """Return whether any of the given (disable) condition entities is on."""
-        for entity_id in condition_entities:
-            state = self.hass.states.get(entity_id)
-            if state is not None and state.state in _CONDITION_TRUE_STATES:
-                return True
-        return False
 
     def _resolve_target(
         self, winner: dict[str, Any] | None

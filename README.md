@@ -9,8 +9,7 @@ Custom Home Assistant integration + dashboard card for managing heating schedule
 - Weekdays (Mon-Sun) individually selectable
 - From/to time, including overnight spans (e.g. 22:00-06:00)
 - Mode per schedule: **Auto**, **Heat** (with target temperature), or **Off** (no temperature needed)
-- Any number of condition entities (`input_boolean`, `binary_sensor`, `switch`) per schedule, **all** of which must be "on" for the schedule to apply
-- Any number of disable condition entities per schedule: if **any** of them is "on", the schedule is ignored
+- Conditions per schedule using Home Assistant's own automation condition editor (state, numeric state, template, time, sun, zone, and/or/not, ...); **all** must be met for the schedule to apply
 - Clear management GUI as a dashboard card: create, edit, duplicate (as a template), delete, enable/disable, reorder via arrows
 - Schedule order = priority: if two active schedules overlap for the same thermostat, the one **lower in the list** automatically wins ("gets overwritten")
 - Two behaviour switches as dedicated `select` entities (see below), changeable live at any time
@@ -47,14 +46,14 @@ Create a schedule in the card via "+ New schedule":
 - **From/To** - time window; if "To" < "From" it automatically wraps past midnight
 - **Mode** - Auto / Heat / Off; no temperature is set when "Off"
 - **Target temperature** - only relevant for Heat/Auto mode
-- **Conditions** - e.g. `input_boolean.heating_enabled`, `input_boolean.kids_home`, `input_boolean.holidays`; the schedule is only applied when **all** selected conditions are "on"
-- **Disable conditions** - the inverse of conditions, e.g. `input_boolean.holidays`, `binary_sensor.window_open`; the schedule is ignored as soon as **any** of them is "on"
+- **Conditions** - exactly the same conditions (and editor) as in automations, e.g. `input_boolean.kids_home` is on, outdoor temperature below 15 °C, someone is home, or any template; the schedule is only applied when **all** top-level conditions are met. To *exclude* a schedule (e.g. during holidays or with a window open), wrap the conditions in a **Not** condition. Weekdays and the time window stay separate fields on purpose.
 
 Use **Duplicate** in a schedule's menu (⋮) to open a pre-filled copy in the editor; it's only created once you save it (and is appended at the end of the list, i.e. with the highest priority).
 
 ## How evaluation works
 
-- Re-evaluated every minute, and immediately whenever a condition entity or one of the two behaviour switches changes.
+- Re-evaluated every minute, and immediately whenever an entity referenced by a condition or one of the two behaviour switches changes. Template conditions don't expose their entities, so they are only re-checked by the minute tick (up to ~1 min delay).
+- A schedule with invalid conditions (e.g. referencing a removed integration) never applies; a warning is logged.
 - For each thermostat, the list of schedules is walked from bottom to top; the **first** schedule found that way (i.e. the one lowest in the list) that currently matches time/weekday, is enabled, has its conditions met and none of its disable conditions on, wins and gets applied.
 - If **no** schedule currently matches (e.g. a gap between two schedules, unmet conditions, or an active disable condition), `select.heating_scheduler_no_schedule_action` ("Heating Scheduler: Without an active schedule") takes over:
   - **Turn off** (default) - the thermostat is set to `off`.
@@ -67,7 +66,7 @@ Both switches appear automatically as entities after setup (device "Heating Sche
 
 ## Data & storage
 
-Schedules are stored in `.storage/heating_scheduler_schedules` inside the Home Assistant configuration (no YAML needed, no restart on changes).
+Schedules are stored in `.storage/heating_scheduler_schedules` inside the Home Assistant configuration (no YAML needed, no restart on changes). Schedules from older versions (plain condition entity lists) are migrated automatically on startup to equivalent `state` conditions ("is on").
 
 ## Developing & testing
 

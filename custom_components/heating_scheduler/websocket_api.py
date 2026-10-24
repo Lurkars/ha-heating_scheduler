@@ -3,9 +3,12 @@ from __future__ import annotations
 
 import voluptuous as vol
 from homeassistant.components import websocket_api
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
 
-from .const import DOMAIN, MODES
+from .const import DOMAIN, MODES, SIGNAL_STATUS_UPDATED
+from .engine import async_validate_conditions
 
 SCHEDULE_SCHEMA = vol.Schema(
     {
@@ -18,8 +21,9 @@ SCHEDULE_SCHEMA = vol.Schema(
         vol.Required("time_to"): str,
         vol.Required("mode"): vol.In(MODES),
         vol.Optional("temperature", default=None): vol.Any(None, vol.Coerce(float)),
-        vol.Optional("conditions", default=[]): [str],
-        vol.Optional("disable_conditions", default=[]): [str],
+        # Automation-style condition configs; validated separately with
+        # Home Assistant's own condition helpers in ws_save_schedule.
+        vol.Optional("conditions", default=[]): [dict],
     },
     extra=vol.REMOVE_EXTRA,
 )
@@ -31,6 +35,7 @@ def async_register(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_save_schedule)
     websocket_api.async_register_command(hass, ws_delete_schedule)
     websocket_api.async_register_command(hass, ws_reorder_schedules)
+    websocket_api.async_register_command(hass, ws_subscribe_status)
 
 
 @websocket_api.websocket_command({vol.Required("type"): f"{DOMAIN}/list"})
@@ -54,6 +59,12 @@ async def ws_save_schedule(hass, connection, msg):
         schedule = SCHEDULE_SCHEMA(msg["schedule"])
     except vol.Invalid as err:
         connection.send_error(msg["id"], "invalid_schedule", str(err))
+        return
+
+    try:
+        await async_validate_conditions(hass, schedule["conditions"])
+    except (vol.Invalid, HomeAssistantError) as err:
+        connection.send_error(msg["id"], "invalid_conditions", str(err))
         return
 
     store = hass.data[DOMAIN]["store"]
@@ -90,3 +101,26 @@ async def ws_reorder_schedules(hass, connection, msg):
     await store.async_reorder(msg["order"])
     await hass.data[DOMAIN]["engine"].async_reload()
     connection.send_result(msg["id"], {"schedules": store.schedules})
+
+
+@websocket_api.websocket_command({vol.Required("type"): f"{DOMAIN}/subscribe_status"})
+@callback
+def ws_subscribe_status(hass, connection, msg):
+    """Push which schedules currently have their conditions met.
+
+    Conditions can be arbitrary (templates, sun, numeric_state, ...), so the
+    card can't evaluate them itself - the engine's result is pushed instead,
+    once right away and then whenever it changes.
+    """
+
+    @callback
+    def forward(status):
+        connection.send_message(
+            websocket_api.event_message(msg["id"], {"conditions_met": status})
+        )
+
+    connection.subscriptions[msg["id"]] = async_dispatcher_connect(
+        hass, SIGNAL_STATUS_UPDATED, forward
+    )
+    connection.send_result(msg["id"])
+    forward(hass.data[DOMAIN]["engine"].conditions_status)

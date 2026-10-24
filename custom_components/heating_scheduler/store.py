@@ -10,11 +10,46 @@ from homeassistant.helpers.storage import Store
 from .const import STORAGE_KEY, STORAGE_VERSION
 
 
+def _state_on(entity_id: str) -> dict[str, Any]:
+    return {"condition": "state", "entity_id": entity_id, "state": "on"}
+
+
+def _migrate_schedule_v1(schedule: dict[str, Any]) -> None:
+    """Convert v1 entity-list conditions into automation-style conditions.
+
+    v1 stored `conditions` (all must be on) and `disable_conditions` (none may
+    be on) as plain entity id lists. v2 stores a single list of Home Assistant
+    condition configs, so "none may be on" becomes one `not` condition.
+    """
+    conditions = [_state_on(entity_id) for entity_id in schedule.get("conditions", [])]
+    disable_conditions = schedule.pop("disable_conditions", [])
+    if disable_conditions:
+        conditions.append(
+            {
+                "condition": "not",
+                "conditions": [_state_on(entity_id) for entity_id in disable_conditions],
+            }
+        )
+    schedule["conditions"] = conditions
+
+
+class _ScheduleStorage(Store):
+    """Store with migrations between schedule storage versions."""
+
+    async def _async_migrate_func(
+        self, old_major_version: int, old_minor_version: int, old_data: dict
+    ) -> dict:
+        if old_major_version < 2:
+            for schedule in old_data.get("schedules", []):
+                _migrate_schedule_v1(schedule)
+        return old_data
+
+
 class ScheduleStore:
     """Load, persist and mutate the list of heating schedules."""
 
     def __init__(self, hass: HomeAssistant) -> None:
-        self._store = Store(hass, STORAGE_VERSION, STORAGE_KEY)
+        self._store = _ScheduleStorage(hass, STORAGE_VERSION, STORAGE_KEY)
         self.schedules: list[dict[str, Any]] = []
 
     async def async_load(self) -> None:

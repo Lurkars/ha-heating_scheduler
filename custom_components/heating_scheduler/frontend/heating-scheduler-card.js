@@ -4,12 +4,10 @@
  * A self-contained management UI for the heating_scheduler integration:
  * lists all schedules, lets you reorder them (list order = priority, last
  * match wins), and add/edit/delete them through a modal form. Entity
- * pickers reuse Home Assistant's own <ha-selector> so the UX matches other
- * HA editors (e.g. the automation/blueprint editor) instead of a bespoke
- * checkbox list.
+ * pickers and the conditions editor reuse Home Assistant's own
+ * <ha-selector> so the UX matches other HA editors (e.g. the
+ * automation/blueprint editor) instead of a bespoke checkbox list.
  */
-
-const CONDITION_DOMAINS = ["input_boolean", "binary_sensor", "switch"];
 
 // Same icon set Home Assistant itself uses for these hvac modes.
 const MODE_ICONS = { auto: "mdi:thermostat-auto", heat: "mdi:fire", off: "mdi:power" };
@@ -29,8 +27,7 @@ const STRINGS = {
     delete: "Löschen",
     enable: "Aktivieren",
     disable: "Deaktivieren",
-    conditionNotMet: "Bedingung nicht erfüllt",
-    disabledBy: "Deaktiviert durch",
+    conditionNotMet: "Bedingungen nicht erfüllt",
     confirmDelete: (name) => `Zeitplan "${name}" wirklich löschen?`,
     editTitle: "Zeitplan bearbeiten",
     newTitle: "Neuer Zeitplan",
@@ -42,8 +39,7 @@ const STRINGS = {
     to: "Bis",
     mode: "Modus",
     targetTemp: "Zieltemperatur (°C)",
-    conditions: "Bedingungen (müssen alle erfüllt sein, sonst wird der Plan ignoriert)",
-    disableConditions: "Ausschlussbedingungen (ist eine davon aktiv, wird der Plan ignoriert)",
+    conditions: "Bedingungen (müssen alle erfüllt sein, sonst wird der Plan ignoriert; zum Ausschließen eine \"Nicht\"-Bedingung verwenden)",
     cancel: "Abbrechen",
     save: "Speichern",
     modeLabels: { auto: "Automatik", heat: "Heizen", off: "Aus" },
@@ -68,8 +64,7 @@ const STRINGS = {
     delete: "Delete",
     enable: "Enable",
     disable: "Disable",
-    conditionNotMet: "Condition not met",
-    disabledBy: "Disabled by",
+    conditionNotMet: "Conditions not met",
     confirmDelete: (name) => `Really delete schedule "${name}"?`,
     editTitle: "Edit schedule",
     newTitle: "New schedule",
@@ -81,8 +76,7 @@ const STRINGS = {
     to: "To",
     mode: "Mode",
     targetTemp: "Target temperature (°C)",
-    conditions: "Conditions (all must be met, otherwise the schedule is ignored)",
-    disableConditions: "Disable conditions (if any of them is on, the schedule is ignored)",
+    conditions: "Conditions (all must be met, otherwise the schedule is ignored; use a \"Not\" condition to exclude)",
     cancel: "Cancel",
     save: "Save",
     modeLabels: { auto: "Auto", heat: "Heat", off: "Off" },
@@ -121,7 +115,6 @@ function emptySchedule() {
     mode: "heat",
     temperature: 21,
     conditions: [],
-    disable_conditions: [],
   };
 }
 
@@ -134,6 +127,10 @@ class HeatingSchedulerCard extends HTMLElement {
     this._error = null;
     this._initialized = false;
     this._t = STRINGS.en;
+    // Schedule id -> conditions met, pushed by the backend (the card can't
+    // evaluate arbitrary automation conditions like templates itself).
+    this._conditionStatus = {};
+    this._statusSubscription = null;
     this._outsideClickHandler = (ev) => {
       if (!ev.composedPath().includes(this)) this._closeAllMenus();
     };
@@ -141,10 +138,31 @@ class HeatingSchedulerCard extends HTMLElement {
 
   connectedCallback() {
     document.addEventListener("click", this._outsideClickHandler);
+    this._subscribeStatus();
   }
 
   disconnectedCallback() {
     document.removeEventListener("click", this._outsideClickHandler);
+    this._unsubscribeStatus();
+  }
+
+  _subscribeStatus() {
+    if (!this._hass || !this.isConnected || this._statusSubscription) return;
+    this._statusSubscription = this._hass.connection.subscribeMessage(
+      (msg) => {
+        this._conditionStatus = msg.conditions_met || {};
+        if (!this._editing) this._render();
+      },
+      { type: "heating_scheduler/subscribe_status" }
+    );
+    // Keep the (rejected) promise on failure so we don't retry on every hass update.
+    this._statusSubscription.catch(() => {});
+  }
+
+  _unsubscribeStatus() {
+    if (!this._statusSubscription) return;
+    this._statusSubscription.then((unsub) => unsub()).catch(() => {});
+    this._statusSubscription = null;
   }
 
   _closeAllMenus(exceptMenu) {
@@ -163,14 +181,14 @@ class HeatingSchedulerCard extends HTMLElement {
     this._t = getStrings(hass);
     if (!this._initialized) {
       this._initialized = true;
+      this._subscribeStatus();
       this._fetchSchedules();
       return;
     }
-    // Re-render the list live when a condition entity used by one of our
-    // schedules changes state (so "currently ignored because of a
-    // condition" stays accurate) or when a scheduled thermostat's current
-    // temperature changes. Skipped while editing so an in-progress form
-    // isn't disturbed.
+    // Re-render the list live when a scheduled thermostat's current
+    // temperature changes (condition status arrives via its own
+    // subscription). Skipped while editing so an in-progress form isn't
+    // disturbed.
     if (!this._editing && this._relevantStateChanged(previousHass, hass)) {
       this._render();
     }
@@ -178,17 +196,9 @@ class HeatingSchedulerCard extends HTMLElement {
 
   _relevantStateChanged(oldHass, newHass) {
     if (!oldHass) return false;
-    const conditionEntities = new Set();
     const climateEntities = new Set();
     for (const schedule of this._schedules) {
-      for (const id of schedule.conditions || []) conditionEntities.add(id);
-      for (const id of schedule.disable_conditions || []) conditionEntities.add(id);
       for (const id of schedule.entities || []) climateEntities.add(id);
-    }
-    for (const id of conditionEntities) {
-      const oldState = oldHass.states[id];
-      const newState = newHass.states[id];
-      if ((oldState && oldState.state) !== (newState && newState.state)) return true;
     }
     for (const id of climateEntities) {
       const oldTemp = oldHass.states[id] && oldHass.states[id].attributes.current_temperature;
@@ -205,24 +215,6 @@ class HeatingSchedulerCard extends HTMLElement {
     if (temps.length === 0) return null;
     const avg = temps.reduce((sum, t) => sum + t, 0) / temps.length;
     return Math.round(avg * 10) / 10;
-  }
-
-  _blockingConditionNames(schedule) {
-    return (schedule.conditions || [])
-      .filter((id) => {
-        const state = this._hass.states[id];
-        return !(state && state.state === "on");
-      })
-      .map((id) => friendlyName(this._hass, id));
-  }
-
-  _activeDisableConditionNames(schedule) {
-    return (schedule.disable_conditions || [])
-      .filter((id) => {
-        const state = this._hass.states[id];
-        return !!state && state.state === "on";
-      })
-      .map((id) => friendlyName(this._hass, id));
   }
 
   getCardSize() {
@@ -272,8 +264,9 @@ class HeatingSchedulerCard extends HTMLElement {
           ...schedule,
           entities: [...schedule.entities],
           weekdays: [...schedule.weekdays],
-          conditions: [...(schedule.conditions || [])],
-          disable_conditions: [...(schedule.disable_conditions || [])],
+          // Condition configs are nested objects - deep copy so editing
+          // doesn't mutate the listed schedule.
+          conditions: JSON.parse(JSON.stringify(schedule.conditions || [])),
         }
       : emptySchedule();
     if (duplicate) {
@@ -422,7 +415,6 @@ class HeatingSchedulerCard extends HTMLElement {
       mode,
       temperature,
       conditions: this._editing.conditions,
-      disable_conditions: this._editing.disable_conditions,
     };
 
     this._saveSchedule(schedule);
@@ -476,20 +468,14 @@ class HeatingSchedulerCard extends HTMLElement {
       ? `${days} · ${schedule.time_from}–${schedule.time_to}`
       : `${days} · ${schedule.time_from}–${schedule.time_to} · ${schedule.temperature} °C`;
 
-    const unmetConditions = this._blockingConditionNames(schedule);
-    const activeDisableConditions = this._activeDisableConditionNames(schedule);
-    const showBlocked = schedule.enabled && (unmetConditions.length > 0 || activeDisableConditions.length > 0);
-    const blockedTitle = [
-      unmetConditions.length > 0 ? `${t.conditionNotMet}: ${unmetConditions.join(", ")}` : "",
-      activeDisableConditions.length > 0 ? `${t.disabledBy}: ${activeDisableConditions.join(", ")}` : "",
-    ].filter(Boolean).join(" · ");
+    const showBlocked = schedule.enabled && this._conditionStatus[schedule.id] === false;
     const avgTemp = this._averageCurrentTemperature(schedule);
 
     return `
       <div class="schedule-item ${schedule.enabled ? "" : "disabled-row"} ${showBlocked ? "condition-blocked" : ""}" data-action="edit" data-id="${schedule.id}">
         <ha-icon class="mode-icon mode-${schedule.mode}" icon="${MODE_ICONS[schedule.mode] || "mdi:thermostat"}"></ha-icon>
         <div class="schedule-info">
-          <div class="schedule-name" ${showBlocked ? `title="${blockedTitle}"` : ""}>${schedule.name}</div>
+          <div class="schedule-name" ${showBlocked ? `title="${t.conditionNotMet}"` : ""}>${schedule.name}</div>
           <div class="schedule-meta">${meta}</div>
         </div>
         <div class="thermostats" title="${entityNames}">
@@ -598,11 +584,6 @@ class HeatingSchedulerCard extends HTMLElement {
               <span>${t.conditions}</span>
               <div id="conditions-picker"></div>
             </div>
-
-            <div class="field">
-              <span>${t.disableConditions}</span>
-              <div id="disable-conditions-picker"></div>
-            </div>
           </div>
           <div class="modal-footer">
             <button class="btn btn-text" data-action="close-modal">${t.cancel}</button>
@@ -614,8 +595,8 @@ class HeatingSchedulerCard extends HTMLElement {
   }
 
   /**
-   * Mount Home Assistant's own <ha-selector> entity pickers into the modal
-   * for the thermostate/condition/disable-condition fields, instead of a bespoke checkbox
+   * Mount Home Assistant's own <ha-selector> pickers into the modal for
+   * the thermostat and condition fields, instead of a bespoke checkbox
    * list, so the UX matches the rest of Home Assistant (e.g. the
    * automation/blueprint editor). ha-selector is part of a lazily loaded
    * frontend chunk, so wait for it to be defined if it isn't yet (it almost
@@ -687,24 +668,10 @@ class HeatingSchedulerCard extends HTMLElement {
     const conditionsContainer = root.getElementById("conditions-picker");
     if (conditionsContainer && !conditionsContainer.firstChild) {
       conditionsContainer.appendChild(
-        this._createEntitySelector({
+        this._createConditionSelector({
           value: this._editing.conditions,
-          domains: CONDITION_DOMAINS,
           onChange: (value) => {
             this._editing.conditions = value;
-          },
-        })
-      );
-    }
-
-    const disableConditionsContainer = root.getElementById("disable-conditions-picker");
-    if (disableConditionsContainer && !disableConditionsContainer.firstChild) {
-      disableConditionsContainer.appendChild(
-        this._createEntitySelector({
-          value: this._editing.disable_conditions,
-          domains: CONDITION_DOMAINS,
-          onChange: (value) => {
-            this._editing.disable_conditions = value;
           },
         })
       );
@@ -764,6 +731,22 @@ class HeatingSchedulerCard extends HTMLElement {
     const el = document.createElement("ha-selector");
     el.hass = this._hass;
     el.selector = { entity: { multiple: true, filter: domains.map((domain) => ({ domain })) } };
+    el.value = value;
+    el.addEventListener("value-changed", (ev) => {
+      ev.stopPropagation();
+      const newValue = ev.detail.value || [];
+      el.value = newValue; // keep the widget's own display in sync
+      this._onSelectorChange(onChange, newValue);
+    });
+    return el;
+  }
+
+  // The same condition editor as in automations/blueprints, storing the
+  // condition configs in exactly the format automations use.
+  _createConditionSelector({ value, onChange }) {
+    const el = document.createElement("ha-selector");
+    el.hass = this._hass;
+    el.selector = { condition: {} };
     el.value = value;
     el.addEventListener("value-changed", (ev) => {
       ev.stopPropagation();
