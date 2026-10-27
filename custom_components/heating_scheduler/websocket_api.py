@@ -21,6 +21,8 @@ SCHEDULE_SCHEMA = vol.Schema(
         vol.Required("time_to"): str,
         vol.Required("mode"): vol.In(MODES),
         vol.Optional("temperature", default=None): vol.Any(None, vol.Coerce(float)),
+        # Takes precedence over "temperature" when set (e.g. an input_number).
+        vol.Optional("temperature_entity", default=None): vol.Any(None, str),
         # Automation-style condition configs; validated separately with
         # Home Assistant's own condition helpers in ws_save_schedule.
         vol.Optional("conditions", default=[]): [dict],

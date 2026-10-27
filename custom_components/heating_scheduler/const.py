@@ -18,7 +18,7 @@ SIGNAL_STATUS_UPDATED = f"{DOMAIN}_status_updated"
 # changes so a hard browser refresh reliably picks up the new file during
 # development, rather than an old cached copy.
 CARD_PATH = "/heating_scheduler_files/heating-scheduler-card.js"
-CARD_VERSION = "14"
+CARD_VERSION = "15"
 CARD_URL = f"{CARD_PATH}?v={CARD_VERSION}"
 
 # Options for the "no schedule active" behaviour select entity. These are

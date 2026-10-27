@@ -21,8 +21,13 @@ Conditions use the exact same format and evaluation as automation conditions
 (state, numeric_state, template, time, sun, and/or/not, ...), via Home
 Assistant's own condition helpers.
 
+The target temperature is either a fixed value or read from an entity
+(input_number, number, temperature sensor) via `temperature_entity`, so it can
+be driven by a variable instead of being hardcoded into the schedule.
+
 Re-evaluation happens every minute and whenever any entity referenced by a
-schedule's conditions - or either behaviour select - changes state, so e.g.
+schedule's conditions or as its temperature entity - or either behaviour
+select - changes state, so e.g.
 "Kinder zuhause" turning off mid-window takes effect immediately instead of
 waiting for the next scheduled boundary. Template conditions don't expose
 their entities, so they are only picked up by the minute tick.
@@ -36,6 +41,7 @@ from datetime import datetime, time as dt_time
 from typing import Any
 
 import voluptuous as vol
+from homeassistant.const import STATE_UNAVAILABLE, STATE_UNKNOWN
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import condition, config_validation as cv
@@ -148,6 +154,10 @@ class SchedulerEngine:
         entities: set[str] = set()
 
         for schedule in self.store.schedules:
+            # Not a condition, but changes to it must re-apply the target too.
+            if schedule.get("temperature_entity"):
+                entities.add(schedule["temperature_entity"])
+
             raw_conditions = schedule.get("conditions", [])
             if not raw_conditions:
                 continue
@@ -272,7 +282,7 @@ class SchedulerEngine:
             return {
                 "source": winner["id"],
                 "mode": winner["mode"],
-                "temperature": winner.get("temperature"),
+                "temperature": self._resolve_temperature(winner),
             }
 
         no_schedule_state = self.hass.states.get(NO_SCHEDULE_ACTION_ENTITY_ID)
@@ -282,6 +292,33 @@ class SchedulerEngine:
         if no_schedule_action == NO_SCHEDULE_OFF:
             return {"source": _FALLBACK_OFF_SOURCE, "mode": "off", "temperature": None}
         return None
+
+    def _resolve_temperature(self, schedule: dict[str, Any]) -> float | None:
+        """Return the fixed temperature, or the current value of its entity.
+
+        An unavailable or non-numeric entity yields None, so only the mode is
+        applied and the thermostat keeps its current setpoint.
+        """
+        entity_id = schedule.get("temperature_entity")
+        if not entity_id:
+            return schedule.get("temperature")
+
+        state = self.hass.states.get(entity_id)
+        if state is None or state.state in (STATE_UNKNOWN, STATE_UNAVAILABLE):
+            _LOGGER.debug(
+                "Temperature entity %s of %s has no value", entity_id, schedule["name"]
+            )
+            return None
+        try:
+            return float(state.state)
+        except ValueError:
+            _LOGGER.warning(
+                "Temperature entity %s of %s is not numeric: %s",
+                entity_id,
+                schedule["name"],
+                state.state,
+            )
+            return None
 
     def _enforcement(self) -> str:
         state = self.hass.states.get(ENFORCEMENT_ENTITY_ID)
@@ -320,9 +357,16 @@ class SchedulerEngine:
         if mode != "off" and temperature is not None:
             current_temp = state.attributes.get("temperature")
             if current_temp != temperature:
-                await self.hass.services.async_call(
-                    "climate",
-                    "set_temperature",
-                    {"entity_id": entity_id, "temperature": temperature},
-                    blocking=True,
-                )
+                try:
+                    await self.hass.services.async_call(
+                        "climate",
+                        "set_temperature",
+                        {"entity_id": entity_id, "temperature": temperature},
+                        blocking=True,
+                    )
+                except HomeAssistantError as err:
+                    # E.g. a variable outside the thermostat's min/max range -
+                    # must not stop the remaining thermostats from being set.
+                    _LOGGER.warning(
+                        "Could not set %s to %s °C: %s", entity_id, temperature, err
+                    )

@@ -12,6 +12,13 @@
 // Same icon set Home Assistant itself uses for these hvac modes.
 const MODE_ICONS = { auto: "mdi:thermostat-auto", heat: "mdi:fire", off: "mdi:power" };
 
+// Entities that can provide a schedule's target temperature as a variable.
+const TEMPERATURE_ENTITY_FILTER = [
+  { domain: "input_number" },
+  { domain: "number" },
+  { domain: "sensor", device_class: "temperature" },
+];
+
 const STRINGS = {
   de: {
     cardName: "Heizungsplaner",
@@ -43,6 +50,8 @@ const STRINGS = {
     to: "Bis",
     mode: "Modus",
     targetTemp: "Zieltemperatur (°C)",
+    tempFixed: "Fester Wert",
+    tempEntity: "Aus Entität",
     conditions: "Bedingungen (müssen alle erfüllt sein, sonst wird der Plan ignoriert; zum Ausschließen eine \"Nicht\"-Bedingung verwenden)",
     cancel: "Abbrechen",
     save: "Speichern",
@@ -53,6 +62,7 @@ const STRINGS = {
     errWeekdays: "Bitte mindestens einen Wochentag auswählen.",
     errTimes: "Bitte Start- und Endzeit angeben.",
     errTemp: "Bitte eine Zieltemperatur angeben.",
+    errTempEntity: "Bitte eine Entität für die Zieltemperatur auswählen.",
   },
   en: {
     cardName: "Heating Scheduler",
@@ -84,6 +94,8 @@ const STRINGS = {
     to: "To",
     mode: "Mode",
     targetTemp: "Target temperature (°C)",
+    tempFixed: "Fixed value",
+    tempEntity: "From entity",
     conditions: "Conditions (all must be met, otherwise the schedule is ignored; use a \"Not\" condition to exclude)",
     cancel: "Cancel",
     save: "Save",
@@ -94,6 +106,7 @@ const STRINGS = {
     errWeekdays: "Please select at least one weekday.",
     errTimes: "Please enter a start and end time.",
     errTemp: "Please enter a target temperature.",
+    errTempEntity: "Please select an entity for the target temperature.",
   },
 };
 
@@ -122,6 +135,7 @@ function emptySchedule() {
     time_to: "22:00",
     mode: "heat",
     temperature: 21,
+    temperature_entity: null,
     conditions: [],
   };
 }
@@ -237,7 +251,21 @@ class HeatingSchedulerCard extends HTMLElement {
       const newTemp = newHass.states[id] && newHass.states[id].attributes.current_temperature;
       if (oldTemp !== newTemp) return true;
     }
+    for (const schedule of this._schedules) {
+      const id = schedule.temperature_entity;
+      if (id && oldHass.states[id] !== newHass.states[id]) return true;
+    }
     return false;
+  }
+
+  // A temperature entity shows its live value plus its name, so it's clear
+  // the schedule follows a variable rather than a fixed value.
+  _formatTargetTemperature(schedule) {
+    const entityId = schedule.temperature_entity;
+    if (!entityId) return `${schedule.temperature} °C`;
+    const state = this._hass.states[entityId];
+    const value = state && !Number.isNaN(Number(state.state)) ? state.state : "?";
+    return `${value} °C (${friendlyName(this._hass, entityId)})`;
   }
 
   _averageCurrentTemperature(schedule) {
@@ -350,9 +378,15 @@ class HeatingSchedulerCard extends HTMLElement {
       this._editing.id = null;
       this._editing.name = `${schedule.name} ${this._t.copySuffix}`;
     }
+    // The number picker shows this default anyway (e.g. after switching
+    // from an entity or from "off"), so keep it in sync with what's shown.
+    this._editing.temperature ??= 21;
+    // Editor-only state, not part of the schedule - the saved schedule only
+    // carries the field of the chosen source.
+    this._tempSource = this._editing.temperature_entity ? "entity" : "fixed";
     // A duplicate is a new, unsaved schedule, so it must be saveable right
     // away even without further changes.
-    this._editingSnapshot = duplicate ? null : JSON.stringify(this._editing);
+    this._editingSnapshot = duplicate ? null : this._editingState();
     this._error = null;
     this._render();
   }
@@ -364,8 +398,12 @@ class HeatingSchedulerCard extends HTMLElement {
     this._render();
   }
 
+  _editingState() {
+    return JSON.stringify([this._editing, this._tempSource]);
+  }
+
   _isDirty() {
-    return JSON.stringify(this._editing) !== this._editingSnapshot;
+    return this._editingState() !== this._editingSnapshot;
   }
 
   _refreshSaveButton() {
@@ -440,6 +478,14 @@ class HeatingSchedulerCard extends HTMLElement {
       modePicker.removeAttribute("open");
       if (this._tempSelectorEl) this._tempSelectorEl.disabled = mode === "off";
       this._refreshSaveButton();
+    } else if (action === "select-temp-source") {
+      this._tempSource = actionEl.dataset.source;
+      actionEl
+        .closest(".temp-source")
+        .querySelectorAll("button")
+        .forEach((btn) => btn.classList.toggle("active", btn === actionEl));
+      this._mountTemperatureSelector();
+      this._refreshSaveButton();
     } else if (action === "save") {
       this._handleSave();
     }
@@ -451,9 +497,11 @@ class HeatingSchedulerCard extends HTMLElement {
     const timeFrom = this._editing.time_from;
     const timeTo = this._editing.time_to;
     const mode = this._editing.mode;
-    const temperature = mode === "off" ? null : this._editing.temperature;
+    const useEntity = mode !== "off" && this._tempSource === "entity";
+    const temperature = mode === "off" || useEntity ? null : this._editing.temperature;
+    const temperatureEntity = useEntity ? this._editing.temperature_entity || null : null;
 
-    this._editing = { ...this._editing, name, temperature };
+    this._editing = { ...this._editing, name, temperature, temperature_entity: temperatureEntity };
 
     if (!name) {
       this._error = t.errName;
@@ -475,7 +523,12 @@ class HeatingSchedulerCard extends HTMLElement {
       this._render();
       return;
     }
-    if (mode !== "off" && (temperature === null || Number.isNaN(temperature))) {
+    if (useEntity && !temperatureEntity) {
+      this._error = t.errTempEntity;
+      this._render();
+      return;
+    }
+    if (mode !== "off" && !useEntity && (temperature === null || Number.isNaN(temperature))) {
       this._error = t.errTemp;
       this._render();
       return;
@@ -491,6 +544,7 @@ class HeatingSchedulerCard extends HTMLElement {
       time_to: timeTo,
       mode,
       temperature,
+      temperature_entity: temperatureEntity,
       conditions: this._editing.conditions,
     };
 
@@ -543,7 +597,7 @@ class HeatingSchedulerCard extends HTMLElement {
     const entityNames = schedule.entities.map((e) => friendlyName(this._hass, e)).join(", ");
     const meta = schedule.mode === "off"
       ? `${days} · ${schedule.time_from}–${schedule.time_to}`
-      : `${days} · ${schedule.time_from}–${schedule.time_to} · ${schedule.temperature} °C`;
+      : `${days} · ${schedule.time_from}–${schedule.time_to} · ${this._formatTargetTemperature(schedule)}`;
 
     const state = this._scheduleState(schedule);
     const stateClasses = state
@@ -658,7 +712,16 @@ class HeatingSchedulerCard extends HTMLElement {
                 </details>
               </div>
               <div class="field">
-                <span>${t.targetTemp}</span>
+                <div class="field-label">
+                  <span>${t.targetTemp}</span>
+                  <div class="temp-source">
+                    ${[["fixed", "mdi:numeric", t.tempFixed], ["entity", "mdi:variable", t.tempEntity]].map(([source, icon, label]) => `
+                      <button type="button" class="${this._tempSource === source ? "active" : ""}" data-action="select-temp-source" data-source="${source}" title="${label}">
+                        <ha-icon icon="${icon}"></ha-icon>
+                      </button>
+                    `).join("")}
+                  </div>
+                </div>
                 <div id="temp-picker"></div>
               </div>
             </div>
@@ -740,7 +803,7 @@ class HeatingSchedulerCard extends HTMLElement {
       entitiesContainer.appendChild(
         this._createEntitySelector({
           value: this._editing.entities,
-          domains: ["climate"],
+          filter: [{ domain: "climate" }],
           onChange: (value) => {
             this._editing.entities = value;
           },
@@ -762,15 +825,35 @@ class HeatingSchedulerCard extends HTMLElement {
 
     const tempContainer = root.getElementById("temp-picker");
     if (tempContainer && !tempContainer.firstChild) {
-      this._tempSelectorEl = this._createNumberSelector({
-        value: this._editing.temperature ?? 21,
-        disabled: this._editing.mode === "off",
-        onChange: (value) => {
-          this._editing.temperature = value;
-        },
-      });
-      tempContainer.appendChild(this._tempSelectorEl);
+      this._mountTemperatureSelector();
     }
+  }
+
+  // (Re-)mount the target temperature picker for the chosen source: a fixed
+  // number, or an entity whose value is used as a variable.
+  _mountTemperatureSelector() {
+    const container = this.shadowRoot.getElementById("temp-picker");
+    if (!container) return;
+    container.replaceChildren();
+    const disabled = this._editing.mode === "off";
+    this._tempSelectorEl = this._tempSource === "entity"
+      ? this._createEntitySelector({
+          value: this._editing.temperature_entity || "",
+          filter: TEMPERATURE_ENTITY_FILTER,
+          multiple: false,
+          disabled,
+          onChange: (value) => {
+            this._editing.temperature_entity = value || null;
+          },
+        })
+      : this._createNumberSelector({
+          value: this._editing.temperature,
+          disabled,
+          onChange: (value) => {
+            this._editing.temperature = value;
+          },
+        });
+    container.appendChild(this._tempSelectorEl);
   }
 
   // All selector value-changed handlers funnel through this so the Save
@@ -810,14 +893,15 @@ class HeatingSchedulerCard extends HTMLElement {
     return el;
   }
 
-  _createEntitySelector({ value, domains, onChange }) {
+  _createEntitySelector({ value, filter, multiple = true, disabled = false, onChange }) {
     const el = document.createElement("ha-selector");
     el.hass = this._hass;
-    el.selector = { entity: { multiple: true, filter: domains.map((domain) => ({ domain })) } };
+    el.selector = { entity: { multiple, filter } };
     el.value = value;
+    el.disabled = disabled;
     el.addEventListener("value-changed", (ev) => {
       ev.stopPropagation();
-      const newValue = ev.detail.value || [];
+      const newValue = ev.detail.value || (multiple ? [] : "");
       el.value = newValue; // keep the widget's own display in sync
       this._onSelectorChange(onChange, newValue);
     });
@@ -986,6 +1070,15 @@ class HeatingSchedulerCard extends HTMLElement {
       }
       .field { display: flex; flex-direction: column; gap: 4px; font-size: 0.9em; color: var(--secondary-text-color); flex: 1; }
       .field-row { display: flex; gap: 12px; }
+      .field-label { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+      .temp-source { display: flex; border: 1px solid var(--divider-color); border-radius: 4px; overflow: hidden; }
+      .temp-source button {
+        display: flex; align-items: center; padding: 2px 6px;
+        background: var(--card-background-color, white); color: var(--secondary-text-color);
+        border: none; cursor: pointer;
+      }
+      .temp-source button.active { background: var(--primary-color); color: var(--text-primary-color, white); }
+      .temp-source ha-icon { --mdc-icon-size: 16px; }
       .weekday-picker { display: flex; gap: 6px; }
       .weekday-toggle {
         flex: 1; padding: 8px 0; border-radius: 4px; border: 1px solid var(--divider-color);

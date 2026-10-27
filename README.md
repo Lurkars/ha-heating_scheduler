@@ -9,6 +9,7 @@ Custom Home Assistant integration + dashboard card for managing heating schedule
 - Weekdays (Mon-Sun) individually selectable
 - From/to time, including overnight spans (e.g. 22:00-06:00)
 - Mode per schedule: **Auto**, **Heat** (with target temperature), or **Off** (no temperature needed)
+- Target temperature as a fixed value or taken from an entity (`input_number`, `number`, temperature sensor), so it can be controlled via a variable
 - Conditions per schedule using Home Assistant's own automation condition editor (state, numeric state, template, time, sun, zone, and/or/not, ...); **all** must be met for the schedule to apply
 - Clear management GUI as a dashboard card: create, edit, duplicate (as a template), delete, enable/disable, reorder via arrows
 - Schedule order = priority: if two active schedules overlap for the same thermostat, the one **lower in the list** automatically wins ("gets overwritten")
@@ -45,7 +46,7 @@ Create a schedule in the card via "+ New schedule":
 - **Weekdays** - which days the schedule applies on
 - **From/To** - time window; if "To" < "From" it automatically wraps past midnight
 - **Mode** - Auto / Heat / Off; no temperature is set when "Off"
-- **Target temperature** - only relevant for Heat/Auto mode
+- **Target temperature** - only relevant for Heat/Auto mode. Use the toggle next to the label to choose between a **fixed value** and **from entity**: with an entity (e.g. `input_number.comfort_temperature`), its current value is used and every change to it is applied right away. If the entity is unavailable or not numeric, only the mode is applied and the thermostat keeps its current setpoint.
 - **Conditions** - exactly the same conditions (and editor) as in automations, e.g. `input_boolean.kids_home` is on, outdoor temperature below 15 °C, someone is home, or any template; the schedule is only applied when **all** top-level conditions are met. To *exclude* a schedule (e.g. during holidays or with a window open), wrap the conditions in a **Not** condition. Weekdays and the time window stay separate fields on purpose.
 
 The mode icon in the list shows each schedule's live state (hover it for details):
@@ -61,7 +62,7 @@ Use **Duplicate** in a schedule's menu (⋮) to open a pre-filled copy in the ed
 
 ## How evaluation works
 
-- Re-evaluated every minute, and immediately whenever an entity referenced by a condition or one of the two behaviour switches changes. Template conditions don't expose their entities, so they are only re-checked by the minute tick (up to ~1 min delay).
+- Re-evaluated every minute, and immediately whenever an entity referenced by a condition, a temperature entity or one of the two behaviour switches changes. Template conditions don't expose their entities, so they are only re-checked by the minute tick (up to ~1 min delay).
 - A schedule with invalid conditions (e.g. referencing a removed integration) never applies; a warning is logged.
 - For each thermostat, the list of schedules is walked from bottom to top; the **first** schedule found that way (i.e. the one lowest in the list) that currently matches time/weekday, is enabled, has its conditions met and none of its disable conditions on, wins and gets applied.
 - If **no** schedule currently matches (e.g. a gap between two schedules, unmet conditions, or an active disable condition), `select.heating_scheduler_no_schedule_action` ("Heating Scheduler: Without an active schedule") takes over:
@@ -69,7 +70,7 @@ Use **Duplicate** in a schedule's menu (⋮) to open a pre-filled copy in the ed
   - **Do nothing** - the thermostat is left untouched; manual control is fully respected.
 - Whenever a target is active (a schedule or the off-fallback), `select.heating_scheduler_enforcement` ("Heating Scheduler: Schedule enforcement") decides how it's handled:
   - **Force schedule** (default) - the target state is re-applied on every evaluation; a manual change gets overwritten again within a minute at most.
-  - **Respect manual changes** - the target state is only applied once on a transition (a new schedule takes over, a new time window starts, the fallback kicks in or stops); after that you can manually override the thermostat without the schedule immediately fighting back, until the next transition.
+  - **Respect manual changes** - the target state is only applied once on a transition (a new schedule takes over, a new time window starts, the fallback kicks in or stops, or the value of a temperature entity changes); after that you can manually override the thermostat without the schedule immediately fighting back, until the next transition.
 
 Both switches appear automatically as entities after setup (device "Heating Scheduler" under Settings → Devices & Services) and can be added to any dashboard as a normal dropdown card.
 
